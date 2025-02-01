@@ -17,7 +17,7 @@ along with this software (see the LICENSE.md file). If not, see
     <!-- NOTE: this overrides only the services from moqui-framework/framework/service/org/moqui/impl/PrintServices.xml that depend on CUPS4J -->
     <!-- These are the services to implement for other network printing implementations (ie to build an alternative to CUPS4J print client) -->
 
-    <service verb="get" noun="ServerPrinters">
+    <service verb="get" noun="CupsServerPrinters">
         <!-- org.moqui.impl.PrintServices.get#ServerPrinters -->
         <description>Get printers from print server and create a moqui.basic.print.NetworkPrinter record for each.</description>
         <in-parameters>
@@ -61,8 +61,6 @@ along with this software (see the LICENSE.md file). If not, see
             <parameter name="jobId" type="Integer"/>
         </out-parameters>
         <actions>
-<!--            <log level="error" message="context inside send CupsPrintJobInternal is: ${context}"/>-->
-            <!-- <log level="warn" message="====== printJob=${printJob}"/> -->
             <service-call name="org.moqui.impl.PrintServices.make#CupsPrinter"
                     in-map="[networkPrinterId:printJob.networkPrinterId]" out-map="context"/>
 
@@ -88,19 +86,21 @@ along with this software (see the LICENSE.md file). If not, see
                     errMsg = e.getMessage()
                 }
             </script>
-            <if condition="errMsg"><then>
+            <if condition="errMsg != null"><then>
                 <service-call name="update#moqui.basic.print.PrintJob" transaction="force-new"
-                        in-map="[printJobId:printJob.printJobId, jobId:jobId, statusId:'PtjSendFailed', errorMessage:errMsg]"/>
-                <return error="true" message="${errMsg}"/>
+                              in-map="[printJobId:printJob.printJobId, jobId:jobId, statusId:'PtjSendFailed', errorMessage:errMsg]"/>
             </then><else>
+                <!-- for now need both as no status flow from created to completed -->
                 <service-call name="update#moqui.basic.print.PrintJob" transaction="force-new"
-                        in-map="[printJobId:printJob.printJobId, jobId:jobId, statusId:'PtjPending']"/>
+                              in-map="[printJobId:printJob.printJobId, jobId:jobId, statusId:'PtjPending']"/>
+                <service-call name="update#moqui.basic.print.PrintJob" transaction="force-new"
+                              in-map="[printJobId:printJob.printJobId, jobId:jobId, statusId:'PtjCompleted']"/>
             </else></if>
         </actions>
     </service>
 
-    <service verb="get" noun="PrintJobDetailsFromServer">
-        <!-- org.moqui.impl.PrintServices.get#PrintJobDetailsFromServer -->
+    <service verb="get" noun="CupsPrintJobDetailsFromServer">
+        <!-- org.moqui.impl.PrintServices.get#CupsPrintJobDetailsFromServer -->
         <description>Gets known local job details (from PrintJob record) job details/attributes from the print server,
             updating PrintJob record for status and just returning the rest.</description>
         <in-parameters><parameter name="printJobId"/></in-parameters>
@@ -146,7 +146,7 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
-    <service verb="hold" noun="PrintJob">
+    <service verb="hold" noun="CupsPrintJob">
         <!-- org.moqui.impl.PrintServices.hold#PrintJob -->
         <in-parameters><parameter name="printJobId"/></in-parameters>
         <actions>
@@ -159,7 +159,7 @@ along with this software (see the LICENSE.md file). If not, see
             </else></if>
         </actions>
     </service>
-    <service verb="release" noun="PrintJob">
+    <service verb="release" noun="CupsPrintJob">
         <!-- org.moqui.impl.PrintServices.release#PrintJob -->
         <in-parameters><parameter name="printJobId"/></in-parameters>
         <actions>
@@ -172,7 +172,7 @@ along with this software (see the LICENSE.md file). If not, see
             </else></if>
         </actions>
     </service>
-    <service verb="cancel" noun="PrintJob">
+    <service verb="cancel" noun="CupsPrintJob">
         <!-- org.moqui.impl.PrintServices.cancel#PrintJob -->
         <in-parameters><parameter name="printJobId"/></in-parameters>
         <actions>
@@ -222,7 +222,7 @@ along with this software (see the LICENSE.md file). If not, see
                 }
                 ]]></script>
             <if condition="cupsPrinter == null">
-                <return error="true" message="Print not found with name [${networkPrinter.printerName}] on server [${networkPrinter.serverHost}] for NetworkPrinter [${networkPrinterId}]"/></if>
+                <return error="true" message="Printer not found with name [${networkPrinter.printerName}] on server [${networkPrinter.serverHost}] for NetworkPrinter [${networkPrinterId}]"/></if>
         </actions>
     </service>
     <service verb="make" noun="CupsClient">
@@ -239,4 +239,209 @@ along with this software (see the LICENSE.md file). If not, see
             <set field="cupsClient" from="new org.cups4j.CupsClient((String) networkPrinter.serverHost, (int) networkPrinter.serverPort ?: 631)"/>
         </actions>
     </service>
+
+    <service verb="pause" noun="CupsPrinter">
+        <in-parameters>
+            <parameter name="networkPrinterId"/>
+        </in-parameters>
+        <out-parameters>
+
+        </out-parameters>
+        <actions>
+            <entity-find-one entity-name="moqui.basic.print.NetworkPrinter" value-field="networkPrinter"/>
+            <set field="errorFound" value="false"/>
+            <script><![CDATA[
+                import org.cups4j.CupsPrinter
+                import org.cups4j.CupsClient
+                import org.cups4j.PrinterStateEnum
+
+                String printerName = networkPrinter.printerName
+                CupsClient cupsClient = new CupsClient(networkPrinter.serverHost, (int) networkPrinter.serverPort);
+                if (printerName) {
+                    printerList = cupsClient.getPrinters()
+                    for (CupsPrinter curPrinter in printerList) {
+                        if (curPrinter.getName() == printerName) {
+                            curPrinter.setState(PrinterStateEnum.STOPPED)
+                            break
+                        }
+                    }
+                }else{
+                    errorFound = "true"
+                }
+                ]]></script>
+            <if condition="errorFound == 'true'">
+                <return error="true" message="Printer pause failed"/>
+             </if>
+        </actions>
+    </service>
+
+    <service verb="start" noun="CupsPrinter">
+        <in-parameters>
+            <parameter name="networkPrinterId"/>
+        </in-parameters>
+        <out-parameters>
+
+        </out-parameters>
+        <actions>
+            <entity-find-one entity-name="moqui.basic.print.NetworkPrinter" value-field="networkPrinter"/>
+            <set field="errorFound" value="false"/>
+            <script><![CDATA[
+                import org.cups4j.CupsPrinter
+                import org.cups4j.CupsClient
+
+                String printerName = networkPrinter.printerName
+                CupsClient cupsClient = new CupsClient(networkPrinter.serverHost, (int) networkPrinter.serverPort);
+                if (printerName) {
+                    printerList = cupsClient.getPrinters()
+                    for (CupsPrinter curPrinter in printerList) {
+                        if (curPrinter.getName() == printerName) {
+                            curPrinter.startPrinter();
+                            break
+                        }
+                    }
+                }else{
+                    errorFound = "true"
+                }
+                ]]></script>
+            <if condition="errorFound == 'true'">
+                <return error="true" message="Printer pause failed"/>
+            </if>
+        </actions>
+    </service>
+
+    <service verb="get" noun="CupsPrinterIpAddress">
+        <description>
+            get a printers ip address from the cups server
+            must have printer ip set in location for cups printer
+        </description>
+        <in-parameters>
+            <parameter name="networkPrinter" type="EntityValue" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="printerIpAddress"/>
+        </out-parameters>
+        <actions>
+            <set field="printerIpAddress" value="Unknown"/>
+            <script><![CDATA[
+                import org.cups4j.CupsPrinter
+                import org.cups4j.CupsClient
+                import java.util.concurrent.ExecutorService
+                import java.util.concurrent.Executors
+                import java.util.concurrent.Future
+                import java.util.concurrent.TimeUnit
+                import java.util.concurrent.TimeoutException
+
+                List<CupsPrinter> printerList = null;
+
+                try{
+                    ExecutorService executor = Executors.newSingleThreadExecutor();
+                    Future<List<CupsPrinter>> future = executor.submit(() -> {
+                        CupsClient cupsClient = new CupsClient(networkPrinter.serverHost, (int) networkPrinter.serverPort);
+                        printerList = cupsClient.getPrinters(); // Fetch printers
+                    })as Future<List<CupsPrinter>>;
+
+                    try {
+                        // Set timeout for getting printers
+                        future.get(3, TimeUnit.SECONDS);
+                    } catch (TimeoutException te) {
+                        System.err.println("⏳ Timeout: Unable to retrieve printers within " + 3 + " seconds.");
+                    } catch (Exception e) {
+                        System.err.println("❌ Error retrieving printers: " + e.getMessage());
+                    } finally {
+                        executor.shutdownNow(); // Ensure the executor is stopped
+                    }
+
+                    if (networkPrinter.printerName) {
+                        for (CupsPrinter curPrinter in printerList) {
+                            if (curPrinter.getName() == networkPrinter.printerName) {
+                                printerIpAddress = curPrinter.getLocation();
+                                break
+                            }
+                        }
+                    }
+                }catch(Exception e){
+                    e.printStackTrace()
+                }
+                ]]></script>
+        </actions>
+    </service>
+
+
+    <service verb="get" noun="CupsPrinterStatus">
+        <description>
+            Get a printer's status from the CUPS server.
+            Must have the printer's IP set in the location for CUPS printer.
+        </description>
+        <in-parameters>
+            <parameter name="networkPrinter" type="EntityValue" required="true"/>
+            <parameter name="username" required="true"/>
+            <parameter name="password" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="printerStatus"/>
+        </out-parameters>
+        <actions>
+            <set field="printerStatus" value="Unknown"/>
+            <script><![CDATA[
+            import java.io.BufferedReader;
+            import java.io.InputStreamReader;
+            import java.util.concurrent.*;
+
+            String serverIp = networkPrinter.serverHost; // Replace with the remote server IP
+            String printerName = networkPrinter.printerName;
+
+            // Build the Expect command
+            String expectScript = String.format(
+                "expect -c \""
+                + "spawn ssh %s@%s \\\"lpstat -p %s\\\"; "
+                + "expect \\\"password:\\\"; "
+                + "send \\\"%s\\r\\\"; "
+                + "expect eof"
+                + "\"",
+                username, serverIp, printerName, password
+            );
+
+            try {
+                // Execute the Expect script
+                ProcessBuilder processBuilder = new ProcessBuilder("bash", "-c", expectScript);
+                processBuilder.redirectErrorStream(true);
+                Process process = processBuilder.start();
+
+                // Handle Output & Error Streams in Parallel
+                ExecutorService executor = Executors.newFixedThreadPool(2);
+                Future<String> outputFuture = executor.submit(() -> {
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+                    String line;
+                    String result = "Unknown";
+                    while ((line = reader.readLine()) != null) {
+                        if (line.contains("printer")) {
+                            result = line.split(" ")[3];
+                            break;
+                        }
+                    }
+                    reader.close();
+                    printerStatus = result;
+                    return result;
+                });
+
+                // Timeout Handling
+                try {
+                    outputFuture.get(3, TimeUnit.SECONDS);
+                } catch (TimeoutException te) {
+                    System.err.println("⏳ Timeout: Process took too long!");
+                    process.destroyForcibly();  // Kill process if it is still running
+                } catch (Exception e) {
+                    System.err.println("❌ Error retrieving printer status: " + e.getMessage());
+                } finally {
+                    executor.shutdownNow(); // Ensure no thread keeps running
+                }
+
+            } catch (IOException e) {
+                System.err.println("❌ Error starting Expect script: " + e.getMessage());
+            }
+        ]]></script>
+        </actions>
+    </service>
+
+
 </services>
