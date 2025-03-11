@@ -241,71 +241,152 @@ along with this software (see the LICENSE.md file). If not, see
     </service>
 
     <service verb="pause" noun="CupsPrinter">
+        <description>
+            Pause the CupsPrinter and reject jobs.
+        </description>
         <in-parameters>
-            <parameter name="networkPrinterId"/>
+            <parameter name="networkPrinter" type="EntityValue" required="true"/>
+            <parameter name="username" required="true"/>
+            <parameter name="password" required="true"/>
         </in-parameters>
         <out-parameters>
 
         </out-parameters>
         <actions>
-            <entity-find-one entity-name="moqui.basic.print.NetworkPrinter" value-field="networkPrinter"/>
-            <set field="errorFound" value="false"/>
+            <set field="printerStatus" value="Unknown"/>
             <script><![CDATA[
-                import org.cups4j.CupsPrinter
-                import org.cups4j.CupsClient
-                import org.cups4j.PrinterStateEnum
+            import java.io.BufferedReader;
+            import java.io.InputStreamReader;
+            import java.util.concurrent.*;
 
-                String printerName = networkPrinter.printerName
-                CupsClient cupsClient = new CupsClient(networkPrinter.serverHost, (int) networkPrinter.serverPort);
-                if (printerName) {
-                    printerList = cupsClient.getPrinters()
-                    for (CupsPrinter curPrinter in printerList) {
-                        if (curPrinter.getName() == printerName) {
-                            curPrinter.setState(PrinterStateEnum.STOPPED)
-                            break
+            String serverIp = networkPrinter.serverHost; // Replace with the remote server IP
+            String printerName = networkPrinter.printerName;
+
+            // Build the Expect command
+            String expectScript = String.format(
+                "expect -c \""
+                + "spawn ssh %s@%s \\\"cupsdisable %s && cupsreject %s\\\"; "
+                + "expect \\\"password:\\\"; "
+                + "send \\\"%s\\r\\\"; "
+                + "expect eof"
+                + "\"",
+                username, serverIp, printerName, printerName, password
+            );
+
+            try {
+                // Execute the Expect script
+                ProcessBuilder processBuilder = new ProcessBuilder("bash", "-c", expectScript);
+                processBuilder.redirectErrorStream(true);
+                Process process = processBuilder.start();
+
+                // Handle Output & Error Streams in Parallel
+                ExecutorService executor = Executors.newFixedThreadPool(2);
+                Future<String> outputFuture = executor.submit(() -> {
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+                    String line;
+                    String result = "Unknown";
+                    while ((line = reader.readLine()) != null) {
+                        if (line.contains("printer")) {
+                            result = line.split(" ")[3];
+                            break;
                         }
                     }
-                }else{
-                    errorFound = "true"
+                    reader.close();
+                    printerStatus = result;
+                    return result;
+                });
+
+                // Timeout Handling
+                try {
+                    outputFuture.get(3, TimeUnit.SECONDS);
+                } catch (TimeoutException te) {
+                    System.err.println("⏳ Timeout: Process took too long!");
+                    process.destroyForcibly();  // Kill process if it is still running
+                } catch (Exception e) {
+                    System.err.println("❌ Error retrieving printer status: " + e.getMessage());
+                } finally {
+                    executor.shutdownNow(); // Ensure no thread keeps running
                 }
-                ]]></script>
-            <if condition="errorFound == 'true'">
-                <return error="true" message="Printer pause failed"/>
-             </if>
+
+            } catch (IOException e) {
+                System.err.println("❌ Error starting Expect script: " + e.getMessage());
+            }
+        ]]></script>
         </actions>
     </service>
 
     <service verb="start" noun="CupsPrinter">
+        <description>
+            Start a CUPS printer on the CUPS server.
+        </description>
         <in-parameters>
-            <parameter name="networkPrinterId"/>
+            <parameter name="networkPrinter" type="EntityValue" required="true"/>
+            <parameter name="username" required="true"/>
+            <parameter name="password" required="true"/>
         </in-parameters>
         <out-parameters>
 
         </out-parameters>
         <actions>
-            <entity-find-one entity-name="moqui.basic.print.NetworkPrinter" value-field="networkPrinter"/>
-            <set field="errorFound" value="false"/>
+            <set field="printerStatus" value="Unknown"/>
             <script><![CDATA[
-                import org.cups4j.CupsPrinter
-                import org.cups4j.CupsClient
+            import java.io.BufferedReader;
+            import java.io.InputStreamReader;
+            import java.util.concurrent.*;
 
-                String printerName = networkPrinter.printerName
-                CupsClient cupsClient = new CupsClient(networkPrinter.serverHost, (int) networkPrinter.serverPort);
-                if (printerName) {
-                    printerList = cupsClient.getPrinters()
-                    for (CupsPrinter curPrinter in printerList) {
-                        if (curPrinter.getName() == printerName) {
-                            curPrinter.startPrinter();
-                            break
+            String serverIp = networkPrinter.serverHost; // Replace with the remote server IP
+            String printerName = networkPrinter.printerName;
+
+            // Build the Expect command
+            String expectScript = String.format(
+                "expect -c \""
+                + "spawn ssh %s@%s \\\"cupsenable %s && cupsaccept %s\\\"; "
+                + "expect \\\"password:\\\"; "
+                + "send \\\"%s\\r\\\"; "
+                + "expect eof"
+                + "\"",
+                username, serverIp, printerName, printerName, password
+            );
+
+            try {
+                // Execute the Expect script
+                ProcessBuilder processBuilder = new ProcessBuilder("bash", "-c", expectScript);
+                processBuilder.redirectErrorStream(true);
+                Process process = processBuilder.start();
+
+                // Handle Output & Error Streams in Parallel
+                ExecutorService executor = Executors.newFixedThreadPool(2);
+                Future<String> outputFuture = executor.submit(() -> {
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+                    String line;
+                    String result = "Unknown";
+                    while ((line = reader.readLine()) != null) {
+                        if (line.contains("printer")) {
+                            result = line.split(" ")[3];
+                            break;
                         }
                     }
-                }else{
-                    errorFound = "true"
+                    reader.close();
+                    printerStatus = result;
+                    return result;
+                });
+
+                // Timeout Handling
+                try {
+                    outputFuture.get(3, TimeUnit.SECONDS);
+                } catch (TimeoutException te) {
+                    System.err.println("⏳ Timeout: Process took too long!");
+                    process.destroyForcibly();  // Kill process if it is still running
+                } catch (Exception e) {
+                    System.err.println("❌ Error retrieving printer status: " + e.getMessage());
+                } finally {
+                    executor.shutdownNow(); // Ensure no thread keeps running
                 }
-                ]]></script>
-            <if condition="errorFound == 'true'">
-                <return error="true" message="Printer pause failed"/>
-            </if>
+
+            } catch (IOException e) {
+                System.err.println("❌ Error starting Expect script: " + e.getMessage());
+            }
+        ]]></script>
         </actions>
     </service>
 
