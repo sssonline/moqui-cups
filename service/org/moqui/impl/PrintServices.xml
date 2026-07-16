@@ -94,7 +94,8 @@ along with this software (see the LICENSE.md file). If not, see
                 <service-call name="update#moqui.basic.print.PrintJob" transaction="force-new"
                               in-map="[printJobId:printJob.printJobId, jobId:jobId, statusId:'PtjPending']"/>
                 <service-call name="update#moqui.basic.print.PrintJob" transaction="force-new"
-                              in-map="[printJobId:printJob.printJobId, jobId:jobId, statusId:'PtjCompleted']"/>
+                              in-map="[printJobId:printJob.printJobId, jobId:jobId, statusId:'PtjCompleted',
+                                       printedDate:ec.user.nowTimestamp]"/>
             </else></if>
         </actions>
     </service>
@@ -139,9 +140,9 @@ along with this software (see the LICENSE.md file). If not, see
                 printerUrl = pja.getPrinterURL()
                 size = pja.getSize()
             </script>
-            <if condition="statusId != printJob.statusId">
+            <if condition="statusId != printJob.statusId || (pagesPrinted &amp;&amp; pagesPrinted != printJob.pages)">
                 <service-call name="update#moqui.basic.print.PrintJob"
-                        in-map="[printJobId:printJob.printJobId, statusId:statusId]"/>
+                        in-map="[printJobId:printJob.printJobId, statusId:statusId, pages:pagesPrinted]"/>
             </if>
         </actions>
     </service>
@@ -447,6 +448,152 @@ along with this software (see the LICENSE.md file). If not, see
         </actions>
     </service>
 
+
+    <service verb="get" noun="CupsPrintJobs">
+        <description>List the jobs currently on the CUPS queue for a printer, in the same map shape as the iSeries
+            spooled file listing so screens can render either.</description>
+        <in-parameters>
+            <parameter name="networkPrinter" type="EntityValue" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="currentPrintJobList" type="List"/>
+        </out-parameters>
+        <actions>
+            <service-call name="org.moqui.impl.PrintServices.make#CupsPrinter"
+                    in-map="[networkPrinterId:networkPrinter.networkPrinterId]" out-map="context"/>
+            <script><![CDATA[
+                import org.cups4j.CupsClient
+                import org.cups4j.CupsPrinter
+                import org.cups4j.PrintJobAttributes
+                import org.cups4j.WhichJobsEnum
+                import java.sql.Timestamp
+                import java.time.format.DateTimeFormatter
+
+                currentPrintJobList = []
+                try {
+                    CupsClient client = new CupsClient((String) networkPrinter.serverHost, (int) (networkPrinter.serverPort ?: 631))
+                    List<PrintJobAttributes> jobs = client.getJobs((CupsPrinter) context.cupsPrinter, WhichJobsEnum.NOT_COMPLETED, "", false)
+                    for (PrintJobAttributes job in jobs) {
+                        Timestamp createdTimestamp = job.getJobCreateTime() != null ? new Timestamp(job.getJobCreateTime().getTime()) : null
+                        String jobState = job.getJobState()?.toString()
+                        currentPrintJobList.add([
+                            jobId: job.getJobID(),
+                            jobName: job.getJobName(),
+                            jobUser: job.getUserName(),
+                            jobNumber: String.valueOf(job.getJobID()),
+                            fileName: job.getJobName(),
+                            fileStatus: jobState,
+                            held: jobState != null && jobState.toLowerCase().contains('held'),
+                            pageNumber: String.valueOf(job.getPagesPrinted()),
+                            createdTimestamp: createdTimestamp,
+                            createdDate: createdTimestamp != null ? createdTimestamp.toLocalDateTime().format(DateTimeFormatter.ofPattern('MM/dd/yyyy')) : '',
+                            createdTime: createdTimestamp != null ? createdTimestamp.toLocalDateTime().format(DateTimeFormatter.ofPattern('HH:mm:ss')) : ''
+                        ])
+                    }
+                } catch (Exception e) {
+                    ec.logger.error("Failed to list CUPS print jobs for printer ${networkPrinter.printerName}", e)
+                }
+            ]]></script>
+        </actions>
+    </service>
+
+    <service verb="manage" noun="CupsQueueJob">
+        <description>Hold, release, or delete a job on the CUPS server queue by its server job id.</description>
+        <in-parameters>
+            <parameter name="networkPrinterId" required="true"/>
+            <parameter name="action" required="true"><description>hold, release, or delete</description></parameter>
+            <parameter name="jobId" type="Integer" required="true"/>
+        </in-parameters>
+        <actions>
+            <service-call name="org.moqui.impl.PrintServices.make#CupsPrinter"
+                    in-map="[networkPrinterId:networkPrinterId]" out-map="context"/>
+            <script><![CDATA[
+                import org.cups4j.CupsClient
+                import org.cups4j.CupsPrinter
+
+                CupsClient client = new CupsClient((String) networkPrinter.serverHost, (int) (networkPrinter.serverPort ?: 631))
+                CupsPrinter printer = (CupsPrinter) context.cupsPrinter
+                boolean ok = false
+                if (action == 'hold') ok = client.holdJob(printer, (int) jobId)
+                else if (action == 'release') ok = client.releaseJob(printer, (int) jobId)
+                else if (action == 'delete') ok = client.cancelJob(printer, (int) jobId)
+                else { ec.message.addError("Unknown queue job action ${action}".toString()); return }
+                if (!ok) ec.message.addError("Could not ${action} job ${jobId} on CUPS server ${networkPrinter.serverHost}".toString())
+            ]]></script>
+        </actions>
+    </service>
+
+    <service verb="move" noun="CupsQueueJob">
+        <description>Move a job on the CUPS server to another printer's queue.</description>
+        <in-parameters>
+            <parameter name="networkPrinterId" required="true"/>
+            <parameter name="targetNetworkPrinterId" required="true"/>
+            <parameter name="jobId" type="Integer" required="true"/>
+            <parameter name="userName"/>
+        </in-parameters>
+        <actions>
+            <service-call name="org.moqui.impl.PrintServices.make#CupsPrinter"
+                    in-map="[networkPrinterId:networkPrinterId]" out-map="context"/>
+            <service-call name="org.moqui.impl.PrintServices.make#CupsPrinter"
+                    in-map="[networkPrinterId:targetNetworkPrinterId]" out-map="targetOut" out-map-add-to-existing="false"/>
+            <script><![CDATA[
+                import org.cups4j.CupsClient
+                import org.cups4j.CupsPrinter
+
+                CupsClient client = new CupsClient((String) networkPrinter.serverHost, (int) (networkPrinter.serverPort ?: 631))
+                boolean ok = client.moveJob((int) jobId, (String) (userName ?: ''), (CupsPrinter) context.cupsPrinter, (CupsPrinter) targetOut.cupsPrinter)
+                if (!ok) ec.message.addError("Could not move job ${jobId} on CUPS server ${networkPrinter.serverHost}".toString())
+            ]]></script>
+        </actions>
+    </service>
+
+    <service verb="get" noun="CupsOutQueueSummaries">
+        <description>Get state, job count, and location (used as the printer IP address) for a list of printers on
+            one CUPS server using a single getPrinters call.</description>
+        <in-parameters>
+            <parameter name="serverHost" required="true"/>
+            <parameter name="serverPort" type="Integer" default="631"/>
+            <parameter name="printers" type="List" required="true"><description>maps with networkPrinterId and printerName</description></parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="summaryList" type="List"><description>maps with networkPrinterId, printerName, status, jobCount, ipAddress</description></parameter>
+        </out-parameters>
+        <actions>
+            <script><![CDATA[
+                import org.cups4j.CupsClient
+                import org.cups4j.CupsPrinter
+                import org.cups4j.PrintJobAttributes
+                import org.cups4j.WhichJobsEnum
+
+                summaryList = []
+                Map<String, CupsPrinter> printerByName = [:]
+                CupsClient client = null
+                try {
+                    client = new CupsClient((String) serverHost, (int) serverPort)
+                    for (CupsPrinter cp in client.getPrinters()) printerByName.put(cp.getName(), cp)
+                } catch (Exception e) {
+                    ec.logger.error("Could not get printers from CUPS server ${serverHost}:${serverPort}", e)
+                    client = null
+                }
+                for (Map printer in printers) {
+                    Map summary = [networkPrinterId:printer.networkPrinterId, printerName:printer.printerName,
+                            status:'Unknown', jobCount:null, ipAddress:'Unknown']
+                    CupsPrinter cp = printerByName.get((String) printer.printerName)
+                    if (cp != null && client != null) {
+                        try {
+                            if (cp.getState() != null) summary.status = cp.getState().toString()
+                            if (cp.getLocation()) summary.ipAddress = cp.getLocation()
+                            List<PrintJobAttributes> jobs = client.getJobs(cp, WhichJobsEnum.NOT_COMPLETED, "", false)
+                            summary.jobCount = jobs != null ? jobs.size() : 0
+                        } catch (Exception e) {
+                            ec.logger.warn("Could not get CUPS queue summary for ${printer.printerName}: ${e.getMessage()}")
+                        }
+                    }
+                    summaryList.add(summary)
+                }
+            ]]></script>
+        </actions>
+    </service>
 
     <service verb="get" noun="CupsPrinterStatus">
         <description>
